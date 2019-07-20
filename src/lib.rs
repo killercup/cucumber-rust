@@ -214,11 +214,11 @@ impl<W: World> Steps<W> {
         combined
     }
 
-    fn run_test(
+    async fn run_test<'f>(
         &self,
-        world: &mut W,
+        world: &'f mut W,
         test_type: TestCaseType<'_, W>,
-        step: &Step,
+        step: Step,
         suppress_output: bool,
     ) -> TestResult {
         let test_result = PanicTrap::run(suppress_output, || match test_type {
@@ -251,11 +251,11 @@ impl<W: World> Steps<W> {
     ) -> bool {
         output.visit_scenario(rule, &scenario);
 
-        if let Some(before_fns) = before_fns {
-            for f in before_fns.iter() {
-                f(&scenario);
-            }
-        }
+        // if let Some(before_fns) = before_fns {
+        //     for f in before_fns.iter() {
+        //         f(&scenario);
+        //     }
+        // }
 
         let mut world = {
             let panic_trap = PanicTrap::run(suppress_output, W::default);
@@ -278,14 +278,19 @@ impl<W: World> Steps<W> {
         let mut is_success = true;
         let mut is_skipping = false;
 
-        let steps = feature
-            .background
-            .iter()
-            .map(|bg| bg.steps.iter())
-            .flatten()
-            .chain(scenario.steps.iter());
+        let mut steps = vec![];
 
-        for step in steps {
+        if let Some(background) = feature.background.as_ref() {
+            for step in background.steps.iter() {
+                steps.push(step.to_owned());
+            }
+        }
+
+        for step in scenario.steps.iter() {
+            steps.push(step.clone());
+        }
+
+        for step in steps.into_iter() {
             output.visit_step(rule, &scenario, &step);
 
             let test_type = match self.test_type(&step) {
@@ -303,7 +308,7 @@ impl<W: World> Steps<W> {
             if is_skipping {
                 output.visit_step_result(rule, &scenario, &step, &TestResult::Skipped);
             } else {
-                let result = self.run_test(&mut world, test_type, &step, suppress_output);
+                let result = self.run_test(&mut world, test_type, step.clone(), suppress_output).await;
                 output.visit_step_result(rule, &scenario, &step, &result);
                 match result {
                     TestResult::Pass => {}
@@ -319,11 +324,11 @@ impl<W: World> Steps<W> {
             }
         }
 
-        if let Some(after_fns) = after_fns {
-            for f in after_fns.iter() {
-                f(&scenario);
-            }
-        }
+        // if let Some(after_fns) = after_fns {
+        //     for f in after_fns.iter() {
+        //         f(&scenario);
+        //     }
+        // }
 
         output.visit_scenario_end(rule, &scenario);
 
