@@ -1,3 +1,5 @@
+#![feature(async_await)]
+
 extern crate cucumber_rust as cucumber;
 use cucumber::{after, before, cucumber};
 

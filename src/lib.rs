@@ -5,6 +5,7 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+#![feature(async_await)]
 
 pub extern crate gherkin;
 pub extern crate globwalk;
@@ -376,7 +377,7 @@ impl<W: World> Steps<W> {
         is_success
     }
 
-    pub fn run(
+    pub async fn run(
         &self,
         feature_files: Vec<PathBuf>,
         before_fns: Option<&[HelperFn]>,
@@ -583,7 +584,8 @@ macro_rules! cucumber {
         @finish; $featurepath:tt; $worldtype:path; $vec:expr; $setupfn:expr; $beforefns:expr; $afterfns:expr
     ) => {
         #[allow(unused_imports)]
-        fn main() {
+        #[runtime::main]
+        async fn main() {
             use std::path::Path;
             use std::process;
             use $crate::globwalk::{glob, GlobWalkerBuilder};
@@ -628,70 +630,10 @@ macro_rules! cucumber {
                 setup_fn();
             }
 
-            if !tests.run(feature_files, before_fns, after_fns, options, &mut output) {
+            if !tests.run(feature_files, before_fns, after_fns, options, &mut output).await {
                 process::exit(1);
             }
         }
-    }
-}
-
-use std::path::Path;
-
-struct Cucumber<W> where W: World {
-    feature: PathBuf,
-    steps: StepsBuilder<W>,
-    // setup: $setupfn:expr,
-    // before: $beforefns:expr,
-    // after: $afterfns:expr
-}
-
-impl<W: World> Cucumber<W> {
-    pub fn new<P: AsRef<Path>>(feature: P) -> Result<Self, std::io::Error> {
-        let feature = std::fs::canonicalize(feature)?;
-
-        Ok(Cucumber {
-            feature,
-            steps: StepsBuilder::new()
-        })
-    }
-
-    pub fn build(self) {
-        use std::path::Path;
-            use std::process;
-            use crate::globwalk::{glob, GlobWalkerBuilder};
-            use crate::gherkin::Scenario;
-            use crate::{Steps, World, DefaultOutput};
-            use crate::cli::make_app;
-
-            let options = make_app().unwrap();
-
-            let walker = GlobWalkerBuilder::new(self.feature, "*.feature")
-                .case_insensitive(true)
-                .build()
-                .expect("feature path is invalid")
-                .into_iter();
-
-            let mut feature_files = walker
-                .filter_map(Result::ok)
-                .map(|entry| entry.path().to_owned())
-                .collect::<Vec<_>>();
-            feature_files.sort();
-
-            let tests = Steps::combine($vec.iter().map(|f| f()));
-
-            let mut output = DefaultOutput::default();
-
-            let setup_fn: Option<fn() -> ()> = $setupfn;
-            let before_fns: Option<&[fn(&Scenario) -> ()]> = $beforefns;
-            let after_fns: Option<&[fn(&Scenario) -> ()]> = $afterfns;
-
-            if let Some(setup_fn) = setup_fn {
-                setup_fn();
-            }
-
-            if !tests.run(feature_files, before_fns, after_fns, options, &mut output) {
-                process::exit(1);
-            }
     }
 }
 
