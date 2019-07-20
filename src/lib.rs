@@ -331,7 +331,7 @@ impl<W: World> Steps<W> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_scenarios(
+    async fn run_scenarios(
         &self,
         feature: &gherkin::Feature,
         rule: Option<&gherkin::Rule>,
@@ -412,7 +412,7 @@ impl<W: World> Steps<W> {
                 after_fns,
                 &options,
                 output,
-            ) {
+            ).await {
                 is_success = false;
             }
 
@@ -426,7 +426,7 @@ impl<W: World> Steps<W> {
                     after_fns,
                     &options,
                     output,
-                ) {
+                ).await {
                     is_success = false;
                 }
                 output.visit_rule_end(&rule);
