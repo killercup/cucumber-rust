@@ -6,7 +6,7 @@ use gherkin;
 
 use crate::TestResult;
 
-pub trait OutputVisitor: Default {
+pub trait OutputVisitor: Default + Clone {
     fn visit_start(&mut self);
     fn visit_feature(&mut self, feature: &gherkin::Feature, path: &Path);
     fn visit_feature_end(&mut self, feature: &gherkin::Feature);

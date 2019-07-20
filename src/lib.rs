@@ -247,7 +247,7 @@ impl<W: World> Steps<W> {
         before_fns: &Option<&[HelperFn]>,
         after_fns: &Option<&[HelperFn]>,
         suppress_output: bool,
-        output: &mut impl OutputVisitor,
+        mut output: impl OutputVisitor,
     ) -> bool {
         output.visit_scenario(rule, &scenario);
 
@@ -348,6 +348,8 @@ impl<W: World> Steps<W> {
     ) -> bool {
         let mut is_success = true;
 
+        let mut crimes = vec![];
+
         for scenario in scenarios {
             // If a tag is specified and the scenario does not have the tag, skip the test.
             let should_skip = match (&scenario.tags, &options.tag) {
@@ -366,20 +368,32 @@ impl<W: World> Steps<W> {
                 }
             }
 
-            if !self.run_scenario(
+            // if !self.run_scenario(
+            //     &feature,
+            //     rule,
+            //     &scenario,
+            //     &before_fns,
+            //     &after_fns,
+            //     options.suppress_output,
+            //     output,
+            // ).await {
+            //     is_success = false;
+            // }
+
+            crimes.push(self.run_scenario(
                 &feature,
                 rule,
                 &scenario,
                 &before_fns,
                 &after_fns,
                 options.suppress_output,
-                output,
-            ).await {
-                is_success = false;
-            }
+                output.clone(),
+            ))
         }
 
-        is_success
+        futures::future::join_all(crimes).await.into_iter().all(|x| x)
+
+        // is_success
     }
 
     pub async fn run(
