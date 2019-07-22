@@ -6,6 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 #![feature(async_await)]
+#![feature(async_closure)]
 
 pub extern crate gherkin;
 pub extern crate globwalk;
@@ -17,6 +18,7 @@ mod panic_trap;
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::fmt;
 use std::fs::File;
 use std::io::{stderr, Read, Write};
 use std::path::PathBuf;
@@ -30,22 +32,68 @@ pub use crate::output::default::DefaultOutput;
 use crate::output::OutputVisitor;
 use crate::panic_trap::{PanicDetails, PanicTrap};
 
-pub trait World: Default {}
+use futures::future::{BoxFuture, Future, FutureExt};
+use std::pin::Pin;
+
+pub trait World: Default + Clone {}
 
 type HelperFn = fn(&Scenario) -> ();
 
-type TestFn<W> = fn(&mut W, &Step) -> ();
-type RegexTestFn<W> = fn(&mut W, &[String], &Step) -> ();
+use std::panic::{UnwindSafe, AssertUnwindSafe};
 
-type TestBag<W> = HashMap<&'static str, TestFn<W>>;
+type TestSyncFn<W> = fn(&mut W, &Step) -> ();
+type RegexTestFn<W> = fn(&mut W, &[String], &Step) -> ();
+type RegexTestSyncFn<W> = fn(&mut W, &[String], &Step) -> ();
+type TestFn<W> = fn(W, Step) -> TestFuture;
+// TODO 
+pub struct TestFuture {
+    future: BoxFuture<'static, ()>
+}
+
+impl UnwindSafe for TestFuture {}
+
+use futures::task::{Poll, Context};
+use std::panic::{catch_unwind};
+
+use pin_utils::unsafe_pinned;
+impl TestFuture {
+    unsafe_pinned!(future: BoxFuture<'static, ()>);
+
+    pub fn new(f: impl Future<Output = ()> + Send + 'static) -> Self {
+        TestFuture { future: f.boxed() }
+    }
+}
+
+
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+impl Future for TestFuture {
+    type Output = Result<(), Box<dyn std::any::Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        catch_unwind(AssertUnwindSafe(|| self.future().poll(cx)))?.map(Ok)
+    }
+}
+
+// type RegexTestFn<W> = fn(&mut W, &[String], &Step) -> BoxFuture<'static, ()>;
+
+// fn woot<W: World>() -> TestFn<W> {// fn(&mut W, &Step) -> Box<dyn Future<Output = ()>> {
+//     Box::new(|world: &mut W, step: &Step| Box::new(async {
+//         step.description;
+//         42usize;
+//     }))
+// }
+
+type TestAsyncBag<W> = HashMap<&'static str, TestFn<W>>;
+type TestSyncBag<W> = HashMap<&'static str, TestSyncFn<W>>;
 type RegexBag<W> = HashMap<HashableRegex, RegexTestFn<W>>;
 
 #[derive(Default)]
 pub struct Steps<W: World> {
-    given: TestBag<W>,
-    when: TestBag<W>,
-    then: TestBag<W>,
+    given: TestSyncBag<W>,
+    when: TestSyncBag<W>,
+    then: TestSyncBag<W>,
     regex: RegexSteps<W>,
+    async_: AsyncSteps<W>,
 }
 
 #[derive(Default)]
@@ -55,8 +103,58 @@ struct RegexSteps<W: World> {
     then: RegexBag<W>,
 }
 
+impl<W: World> fmt::Debug for Steps<W> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("Steps")
+            .field("given", &self.given.keys())
+            .field("when", &self.when.keys())
+            .field("then", &self.then.keys())
+            .field("regex", &self.regex)
+            .field("async", &self.async_)
+            .finish()
+    }
+}
+
+impl<W: World> fmt::Debug for RegexSteps<W> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("RegexSteps")
+            .field("given", &self.given.keys())
+            .field("when", &self.when.keys())
+            .field("then", &self.then.keys())
+            .finish()
+    }
+}
+
+impl<W: World> fmt::Debug for AsyncSteps<W> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("AsyncSteps")
+            .field("given", &self.given.keys())
+            .field("when", &self.when.keys())
+            .field("then", &self.then.keys())
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct AsyncSteps<W: World> {
+    given: TestAsyncBag<W>,
+    when: TestAsyncBag<W>,
+    then: TestAsyncBag<W>,
+}
+
+// impl<W: World> Default for AsyncSteps<W> {
+//     fn default() -> Self {
+//         AsyncSteps {
+//             given: HashMap::new(),
+//             when: HashMap::new(),
+//             then: HashMap::new(),
+//         }
+//     }
+// }
+
 enum TestCaseType<'a, W: 'a + World> {
-    Normal(&'a TestFn<W>),
+    Normal(&'a TestSyncFn<W>),
+    Async(&'a TestFn<W>),
     Regex(&'a RegexTestFn<W>, Vec<String>),
 }
 
@@ -74,39 +172,57 @@ where
     steps: Steps<W>,
 }
 
+// impl<W: World + Send> StepsBuilder<W> {
+// }
+
 impl<W: World> StepsBuilder<W> {
     pub fn new() -> StepsBuilder<W> {
         StepsBuilder {
-            steps: Default::default(),
+            steps: Steps::default()
         }
     }
 
-    pub fn given(&mut self, name: &'static str, test_fn: TestFn<W>) -> &mut Self {
+    pub fn add_normal_async(
+        &mut self,
+        ty: StepType,
+        name: &'static str,
+        test_fn: TestFn<W>,
+    ) -> &mut Self {
+        self.steps.async_bag_mut_for(ty).insert(name, test_fn);
+        self
+    }
+
+    pub fn given_async(&mut self, name: &'static str, test_fn: TestFn<W>) -> &mut Self {
+        self.add_normal_async(StepType::Given, name, test_fn);
+        self
+    }
+
+    pub fn given(&mut self, name: &'static str, test_fn: TestSyncFn<W>) -> &mut Self {
         self.add_normal(StepType::Given, name, test_fn);
         self
     }
 
-    pub fn when(&mut self, name: &'static str, test_fn: TestFn<W>) -> &mut Self {
+    pub fn when(&mut self, name: &'static str, test_fn: TestSyncFn<W>) -> &mut Self {
         self.add_normal(StepType::When, name, test_fn);
         self
     }
 
-    pub fn then(&mut self, name: &'static str, test_fn: TestFn<W>) -> &mut Self {
+    pub fn then(&mut self, name: &'static str, test_fn: TestSyncFn<W>) -> &mut Self {
         self.add_normal(StepType::Then, name, test_fn);
         self
     }
 
-    pub fn given_regex(&mut self, regex: &'static str, test_fn: RegexTestFn<W>) -> &mut Self {
+    pub fn given_regex(&mut self, regex: &'static str, test_fn: RegexTestSyncFn<W>) -> &mut Self {
         self.add_regex(StepType::Given, regex, test_fn);
         self
     }
 
-    pub fn when_regex(&mut self, regex: &'static str, test_fn: RegexTestFn<W>) -> &mut Self {
+    pub fn when_regex(&mut self, regex: &'static str, test_fn: RegexTestSyncFn<W>) -> &mut Self {
         self.add_regex(StepType::When, regex, test_fn);
         self
     }
 
-    pub fn then_regex(&mut self, regex: &'static str, test_fn: RegexTestFn<W>) -> &mut Self {
+    pub fn then_regex(&mut self, regex: &'static str, test_fn: RegexTestSyncFn<W>) -> &mut Self {
         self.add_regex(StepType::Then, regex, test_fn);
         self
     }
@@ -115,13 +231,18 @@ impl<W: World> StepsBuilder<W> {
         &mut self,
         ty: StepType,
         name: &'static str,
-        test_fn: TestFn<W>,
+        test_fn: TestSyncFn<W>,
     ) -> &mut Self {
         self.steps.test_bag_mut_for(ty).insert(name, test_fn);
         self
     }
 
-    pub fn add_regex(&mut self, ty: StepType, regex: &str, test_fn: RegexTestFn<W>) -> &mut Self {
+    pub fn add_regex(
+        &mut self,
+        ty: StepType,
+        regex: &str,
+        test_fn: RegexTestSyncFn<W>,
+    ) -> &mut Self {
         let regex = Regex::new(regex)
             .unwrap_or_else(|_| panic!("`{}` is not a valid regular expression", regex));
 
@@ -137,8 +258,8 @@ impl<W: World> StepsBuilder<W> {
     }
 }
 
-impl<W: World> Steps<W> {
-    fn test_bag_for(&self, ty: StepType) -> &TestBag<W> {
+impl<W: World + Default> Steps<W> {
+    fn test_bag_for(&self, ty: StepType) -> &TestSyncBag<W> {
         match ty {
             StepType::Given => &self.given,
             StepType::When => &self.when,
@@ -146,11 +267,27 @@ impl<W: World> Steps<W> {
         }
     }
 
-    fn test_bag_mut_for(&mut self, ty: StepType) -> &mut TestBag<W> {
+    fn test_bag_mut_for(&mut self, ty: StepType) -> &mut TestSyncBag<W> {
         match ty {
             StepType::Given => &mut self.given,
             StepType::When => &mut self.when,
             StepType::Then => &mut self.then,
+        }
+    }
+
+    fn async_bag_for(&self, ty: StepType) -> &TestAsyncBag<W> {
+        match ty {
+            StepType::Given => &self.async_.given,
+            StepType::When => &self.async_.when,
+            StepType::Then => &self.async_.then,
+        }
+    }
+
+    fn async_bag_mut_for(&mut self, ty: StepType) -> &mut TestAsyncBag<W> {
+        match ty {
+            StepType::Given => &mut self.async_.given,
+            StepType::When => &mut self.async_.when,
+            StepType::Then => &mut self.async_.then,
         }
     }
 
@@ -173,6 +310,10 @@ impl<W: World> Steps<W> {
     fn test_type<'a>(&'a self, step: &Step) -> Option<TestCaseType<'a, W>> {
         if let Some(t) = self.test_bag_for(step.ty).get(&*step.value) {
             return Some(TestCaseType::Normal(t));
+        }
+
+        if let Some(t) = self.async_bag_for(step.ty).get(&*step.value) {
+            return Some(TestCaseType::Async(t));
         }
 
         if let Some((regex, t)) = self
@@ -209,6 +350,10 @@ impl<W: World> Steps<W> {
             combined.regex.given.extend(steps.regex.given);
             combined.regex.when.extend(steps.regex.when);
             combined.regex.then.extend(steps.regex.then);
+
+            combined.async_.given.extend(steps.async_.given);
+            combined.async_.when.extend(steps.async_.when);
+            combined.async_.then.extend(steps.async_.then);
         }
 
         combined
@@ -221,10 +366,41 @@ impl<W: World> Steps<W> {
         step: Step,
         suppress_output: bool,
     ) -> TestResult {
-        let test_result = PanicTrap::run(suppress_output, || match test_type {
-            TestCaseType::Normal(t) => t(world, &step),
-            TestCaseType::Regex(t, ref c) => t(world, c, &step),
-        });
+        let test_result = match test_type {
+            TestCaseType::Normal(t) => PanicTrap::run(suppress_output, || t(world, &step)),
+            TestCaseType::Regex(t, ref c) => PanicTrap::run(suppress_output, || t(world, c, &step)),
+            TestCaseType::Async(t) => {
+                let unwindable = t(world.clone(), step.clone())
+                    .catch_unwind();
+                let result = match unwindable.await {
+                    Ok(unwind) => match unwind {
+                        Ok(_) => Ok(()),
+                        Err(e) => {
+                            let payload = if let Some(s) = e.downcast_ref::<String>() {
+                                s.clone().to_string()
+                            } else if let Some(s) = e.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else {
+                                "Opaque panic payload".to_owned()
+                            };
+                            Err(PanicDetails { payload, location: "<async>:0:0".into() })
+                        }
+                    },
+                    Err(e) => Err(PanicDetails { payload: "".into(), location: "".into() })
+                };
+                    //     println!("OK: {:?}", &x);
+                    //     ()
+                    // })
+                    // .map_err(|e| {
+                    //     println!("ERR: {:?}", &e);
+                    //     PanicDetails { payload: "".into(), location: "".into() }
+                    // });
+                // println!("RESULT: {:?}", &result);
+                PanicTrap { result, stdout: vec![], stderr: vec![] }
+            }
+        };
+
+        // TestResult::Pass
 
         match test_result.result {
             Ok(_) => TestResult::Pass,
@@ -251,11 +427,11 @@ impl<W: World> Steps<W> {
     ) -> bool {
         output.visit_scenario(rule, &scenario);
 
-        // if let Some(before_fns) = before_fns {
-        //     for f in before_fns.iter() {
-        //         f(&scenario);
-        //     }
-        // }
+        if let Some(before_fns) = before_fns {
+            for f in before_fns.iter() {
+                f(&scenario);
+            }
+        }
 
         let mut world = {
             let panic_trap = PanicTrap::run(suppress_output, W::default);
@@ -308,7 +484,9 @@ impl<W: World> Steps<W> {
             if is_skipping {
                 output.visit_step_result(rule, &scenario, &step, &TestResult::Skipped);
             } else {
-                let result = self.run_test(&mut world, test_type, step.clone(), suppress_output).await;
+                let result = self
+                    .run_test(&mut world, test_type, step.clone(), suppress_output)
+                    .await;
                 output.visit_step_result(rule, &scenario, &step, &result);
                 match result {
                     TestResult::Pass => {}
@@ -324,11 +502,11 @@ impl<W: World> Steps<W> {
             }
         }
 
-        // if let Some(after_fns) = after_fns {
-        //     for f in after_fns.iter() {
-        //         f(&scenario);
-        //     }
-        // }
+        if let Some(after_fns) = after_fns {
+            for f in after_fns.iter() {
+                f(&scenario);
+            }
+        }
 
         output.visit_scenario_end(rule, &scenario);
 
@@ -346,9 +524,7 @@ impl<W: World> Steps<W> {
         options: &cli::CliOptions,
         output: &mut impl OutputVisitor,
     ) -> bool {
-        let mut is_success = true;
-
-        let mut crimes = vec![];
+        let mut futures = vec![];
 
         for scenario in scenarios {
             // If a tag is specified and the scenario does not have the tag, skip the test.
@@ -368,19 +544,7 @@ impl<W: World> Steps<W> {
                 }
             }
 
-            // if !self.run_scenario(
-            //     &feature,
-            //     rule,
-            //     &scenario,
-            //     &before_fns,
-            //     &after_fns,
-            //     options.suppress_output,
-            //     output,
-            // ).await {
-            //     is_success = false;
-            // }
-
-            crimes.push(self.run_scenario(
+            futures.push(self.run_scenario(
                 &feature,
                 rule,
                 &scenario,
@@ -391,9 +555,11 @@ impl<W: World> Steps<W> {
             ))
         }
 
-        futures::future::join_all(crimes).await.into_iter().all(|x| x)
-
-        // is_success
+        // Check if all are successful
+        futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .all(|x| x)
     }
 
     pub async fn run(
@@ -423,29 +589,35 @@ impl<W: World> Steps<W> {
             };
 
             output.visit_feature(&feature, &path);
-            if !self.run_scenarios(
-                &feature,
-                None,
-                &feature.scenarios,
-                before_fns,
-                after_fns,
-                &options,
-                output,
-            ).await {
+            if !self
+                .run_scenarios(
+                    &feature,
+                    None,
+                    &feature.scenarios,
+                    before_fns,
+                    after_fns,
+                    &options,
+                    output,
+                )
+                .await
+            {
                 is_success = false;
             }
 
             for rule in &feature.rules {
                 output.visit_rule(&rule);
-                if !self.run_scenarios(
-                    &feature,
-                    Some(&rule),
-                    &rule.scenarios,
-                    before_fns,
-                    after_fns,
-                    &options,
-                    output,
-                ).await {
+                if !self
+                    .run_scenarios(
+                        &feature,
+                        Some(&rule),
+                        &rule.scenarios,
+                        before_fns,
+                        after_fns,
+                        &options,
+                        output,
+                    )
+                    .await
+                {
                     is_success = false;
                 }
                 output.visit_rule_end(&rule);

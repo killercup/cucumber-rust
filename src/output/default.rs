@@ -6,9 +6,9 @@ use std::path::Path;
 
 use gherkin;
 use pathdiff::diff_paths;
+use std::sync::{Arc, Mutex, RwLock};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use textwrap;
-use std::sync::{Arc, Mutex, RwLock};
 
 use crate::OutputVisitor;
 use crate::TestResult;
@@ -42,7 +42,7 @@ impl Clone for DefaultOutput {
             scenarios: Arc::clone(&self.scenarios),
             step_count: self.step_count,
             skipped_count: self.skipped_count,
-            fail_count: self.fail_count
+            fail_count: self.fail_count,
         }
     }
 }
@@ -235,7 +235,8 @@ impl DefaultOutput {
         // Do scenario count
         let scenario_passed_count = self
             .scenarios
-            .read().unwrap()
+            .read()
+            .unwrap()
             .values()
             .filter(|v| match v {
                 ScenarioResult::Pass => true,
@@ -244,7 +245,8 @@ impl DefaultOutput {
             .count();
         let scenario_fail_count = self
             .scenarios
-            .read().unwrap()
+            .read()
+            .unwrap()
             .values()
             .filter(|v| match v {
                 ScenarioResult::Fail => true,
@@ -253,7 +255,8 @@ impl DefaultOutput {
             .count();
         let scenario_skipped_count = self
             .scenarios
-            .read().unwrap()
+            .read()
+            .unwrap()
             .values()
             .filter(|v| match v {
                 ScenarioResult::Skip => true,
@@ -261,7 +264,11 @@ impl DefaultOutput {
             })
             .count();
 
-        write!(&mut self.stdout, "{} scenarios (", &self.scenarios.read().unwrap().len())?;
+        write!(
+            &mut self.stdout,
+            "{} scenarios (",
+            &self.scenarios.read().unwrap().len()
+        )?;
 
         if scenario_fail_count > 0 {
             self.set_color(Color::Red, true);
@@ -419,14 +426,18 @@ impl OutputVisitor for DefaultOutput {
         scenario: &gherkin::Scenario,
     ) {
         if !self.scenarios.read().unwrap().contains_key(scenario) {
-            self.scenarios.write().unwrap()
+            self.scenarios
+                .write()
+                .unwrap()
                 .insert(scenario.clone(), ScenarioResult::Skip);
         }
     }
 
     fn visit_scenario_end(&mut self, _rule: Option<&gherkin::Rule>, scenario: &gherkin::Scenario) {
         if !self.scenarios.read().unwrap().contains_key(scenario) {
-            self.scenarios.write().unwrap()
+            self.scenarios
+                .write()
+                .unwrap()
                 .insert(scenario.clone(), ScenarioResult::Pass);
         }
         self.println("");
@@ -533,7 +544,9 @@ impl OutputVisitor for DefaultOutput {
                 );
 
                 self.fail_count += 1;
-                self.scenarios.write().unwrap()
+                self.scenarios
+                    .write()
+                    .unwrap()
                     .insert(scenario.clone(), ScenarioResult::Fail);
             }
             TestResult::Skipped => {
